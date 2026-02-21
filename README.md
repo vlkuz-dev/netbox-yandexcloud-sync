@@ -36,8 +36,8 @@ Synchronize Yandex Cloud resources (VMs, networks, zones) to NetBox inventory ma
 ### From source
 
 ```bash
-git clone https://github.com/vlkuz-dev/netbox-yc-sync.git
-cd netbox-yc-sync
+git clone https://github.com/vlkuz-dev/netbox-yandexcloud-sync.git
+cd netbox-yandexcloud-sync
 pip install .
 ```
 

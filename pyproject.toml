@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "netbox-yc-sync"
+name = "netbox-yandexcloud-sync"
 version = "3.0.0"
 description = "Sync Yandex Cloud infrastructure to NetBox"
 readme = "README.md"
@@ -38,9 +38,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vlkuz-dev/netbox-yc-sync"
-Repository = "https://github.com/vlkuz-dev/netbox-yc-sync"
-Issues = "https://github.com/vlkuz-dev/netbox-yc-sync/issues"
+Homepage = "https://github.com/vlkuz-dev/netbox-yandexcloud-sync"
+Repository = "https://github.com/vlkuz-dev/netbox-yandexcloud-sync"
+Issues = "https://github.com/vlkuz-dev/netbox-yandexcloud-sync/issues"
 
 [project.scripts]
 netbox-sync = "netbox_sync.cli:main"
