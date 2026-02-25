@@ -190,7 +190,7 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
         for i, d in enumerate(yc_disks):
             if isinstance(d, dict):
                 name = d.get("name", f"disk{i}")
-                size_mb = d.get("size", 0) // (1024**2)
+                size_mb = round(d.get("size", 0) / (1024 ** 3) * 1000)
                 if size_mb > 0:
                     yc_disk_map[name] = size_mb
 

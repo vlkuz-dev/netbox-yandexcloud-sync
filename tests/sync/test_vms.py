@@ -342,12 +342,12 @@ class TestSyncVmDisks:
         netbox.create_disk.assert_called_once()
         disk_data = netbox.create_disk.call_args[0][0]
         assert disk_data["name"] == "boot"
-        assert disk_data["size"] == 10240  # 10 GB in MB
+        assert disk_data["size"] == 10000  # 10 GiB -> 10000 MB (NetBox displays as 10.00 GB)
 
     def test_unchanged_disk(self):
         """Existing disks with matching size are unchanged."""
         netbox = make_mock_netbox_client()
-        existing_disk = MockRecord(id=10, name="boot", size=10240)
+        existing_disk = MockRecord(id=10, name="boot", size=10000)
         netbox.nb.virtualization.virtual_disks.filter.return_value = [existing_disk]
 
         vm = MockRecord(id=1, name="test-vm")

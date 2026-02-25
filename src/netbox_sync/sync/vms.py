@@ -390,7 +390,7 @@ def sync_vm_disks(
                 # Check if size needs updating
                 size = disk.get("size", 0)
                 if isinstance(size, (int, float)) and size > 0:
-                    size_mb = int(size) // (1024**2)
+                    size_mb = round(int(size) / (1024 ** 3) * 1000)
                     if existing_disk.size != size_mb:
                         if netbox.dry_run:
                             logger.info(
@@ -422,7 +422,7 @@ def sync_vm_disks(
 
             disk_data = {
                 "virtual_machine": vm.id,
-                "size": int(size) // (1024**2),
+                "size": round(int(size) / (1024 ** 3) * 1000),
                 "name": disk_name
             }
 
@@ -939,7 +939,7 @@ def sync_vms(
                     if isinstance(size, (int, float)):
                         disk_data = {
                             "virtual_machine": created_vm.id,
-                            "size": int(size) // (1024**2),
+                            "size": round(int(size) / (1024 ** 3) * 1000),
                             "name": str(disk.get("name", "disk"))
                         }
                         netbox.create_disk(disk_data)

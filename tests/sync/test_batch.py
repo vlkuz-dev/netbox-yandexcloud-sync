@@ -79,7 +79,7 @@ def make_mock_ip(id, address, assigned_object_id=None, assigned_object_type="vir
     )
 
 
-def make_mock_disk(id, name, vm_id, size=10240):
+def make_mock_disk(id, name, vm_id, size=10000):
     """Create a mock disk record."""
     return MockRecord(
         id=id,
@@ -252,7 +252,7 @@ class TestLoadNetboxData:
 
     def test_load_disks(self):
         vm1 = make_mock_vm(1, "vm-1")
-        disk = make_mock_disk(200, "boot-disk", 1, size=10240)
+        disk = make_mock_disk(200, "boot-disk", 1, size=10000)
 
         netbox = make_mock_netbox()
         netbox.nb.virtualization.virtual_machines.all.return_value = [vm1]
@@ -1180,7 +1180,7 @@ class TestApplyBatchUpdates:
         cache = NetBoxCache()
         cache.disks_to_create = [{
             "virtual_machine": 1,
-            "size": 10240,
+            "size": 10000,
             "name": "boot"
         }]
 
