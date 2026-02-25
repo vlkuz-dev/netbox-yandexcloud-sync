@@ -497,6 +497,26 @@ class TestProcessVmUpdates:
         assert len(cache.disks_to_create) == 1
         assert cache.disks_to_create[0]["name"] == "boot"
 
+    def test_disk_size_change_queued_for_update(self):
+        """Existing disk with different size should be queued for update."""
+        vm = make_mock_vm(1, "vm-1")
+        cache = self._make_cache_with_vm(vm)
+        existing_disk = make_mock_disk(200, "boot", 1, size=40960)  # old size
+        cache.disks_by_vm[1] = [existing_disk]
+
+        yc_vm = {
+            "resources": {"memory": 2000 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [],
+            "disks": [{"name": "boot", "size": 40 * (1024**3)}],  # 40 GiB
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert len(cache.disks_to_update) == 1
+        assert cache.disks_to_update[0] == (existing_disk, 40000)
+
     def test_orphaned_disk_queued_for_deletion(self):
         """Disk in NetBox but not in YC should be queued for deletion."""
         vm = make_mock_vm(1, "vm-1")
@@ -1189,6 +1209,20 @@ class TestApplyBatchUpdates:
 
         assert stats["disks_created"] == 1
         netbox.create_disk.assert_called_once()
+
+    def test_disk_size_update(self):
+        """Queued disk size updates should save new size."""
+        disk = make_mock_disk(200, "boot", 1, size=40960)
+
+        cache = NetBoxCache()
+        cache.disks_to_update = [(disk, 40000)]
+
+        netbox = make_mock_netbox()
+        stats = apply_batch_updates(cache, netbox)
+
+        assert stats["disks_updated"] == 1
+        assert disk.size == 40000
+        disk.save.assert_called_once()
 
     def test_primary_ip_unset(self):
         """Primary IP changes with None should unset primary_ip4."""

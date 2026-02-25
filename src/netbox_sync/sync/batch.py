@@ -38,6 +38,7 @@ class NetBoxCache:
     interfaces_to_create: List[Dict[str, Any]] = field(default_factory=list)
     ips_to_create: List[Dict[str, Any]] = field(default_factory=list)
     disks_to_create: List[Dict[str, Any]] = field(default_factory=list)
+    disks_to_update: List[Any] = field(default_factory=list)
     disks_to_delete: List[Any] = field(default_factory=list)
     pending_primary_ips: Dict[int, str] = field(default_factory=dict)
     # Pending IP reassignments keyed by ip_id, value is pending interface key
@@ -196,7 +197,7 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
 
         existing_disk_map = {d.name: d for d in existing_disks}
 
-        # Find disks to create
+        # Find disks to create or update
         for name, size in yc_disk_map.items():
             if name not in existing_disk_map:
                 cache.disks_to_create.append({
@@ -205,6 +206,12 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
                     "name": name
                 })
                 changes_made = True
+            else:
+                # Check if disk size needs updating
+                existing_disk = existing_disk_map[name]
+                if existing_disk.size != size:
+                    cache.disks_to_update.append((existing_disk, size))
+                    changes_made = True
 
         # Find disks to delete
         for disk in existing_disks:
@@ -425,6 +432,7 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
         "interfaces_created": 0,
         "ips_created": 0,
         "disks_created": 0,
+        "disks_updated": 0,
         "disks_deleted": 0,
         "errors": 0
     }
@@ -445,6 +453,7 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
         logger.info(f"  Interfaces to create: {len(cache.interfaces_to_create)}")
         logger.info(f"  IPs to create: {len(cache.ips_to_create)}")
         logger.info(f"  Disks to create: {len(cache.disks_to_create)}")
+        logger.info(f"  Disks to update: {len(cache.disks_to_update)}")
         logger.info(f"  Disks to delete: {len(cache.disks_to_delete)}")
         return stats
 
@@ -586,6 +595,19 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
         except Exception as e:
             logger.error(f"Failed to create disk: {e}")
             stats["errors"] += 1
+
+    # Step 6b: Update disk sizes
+    if cache.disks_to_update:
+        logger.info(f"Step 6b: Updating {len(cache.disks_to_update)} disk sizes...")
+        for disk, new_size in cache.disks_to_update:
+            try:
+                logger.debug(f"Updating disk {disk.name} size: {disk.size} -> {new_size}")
+                disk.size = new_size
+                disk.save()
+                stats["disks_updated"] += 1
+            except Exception as e:
+                logger.error(f"Failed to update disk {disk.name}: {e}")
+                stats["errors"] += 1
 
     # Step 7: Update VMs
     logger.info("Step 7: Updating VM parameters...")
