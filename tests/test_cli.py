@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import netbox_sync
 from netbox_sync.cli import parse_args, main
 
 
@@ -129,7 +130,7 @@ class TestCLIIntegration:
             text=True,
         )
         assert result.returncode == 0
-        assert "netbox-sync 3.0.0" in result.stdout
+        assert f"netbox-sync {netbox_sync.__version__}" in result.stdout
 
     def test_help_output(self):
         result = subprocess.run(
