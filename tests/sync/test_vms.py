@@ -49,7 +49,7 @@ class TestPrepareVmData:
 
         assert result["name"] == "test-vm"
         assert result["vcpus"] == 2
-        assert result["memory"] == 4096  # 4GB in bytes -> 4096 MB
+        assert result["memory"] == 4000  # 4 GiB in bytes -> 4000 MB (NetBox displays as 4.00 GB)
         assert result["status"] == "active"
         assert result["cluster"] == 20
         assert result["site"] == 10
@@ -70,7 +70,7 @@ class TestPrepareVmData:
 
         result = prepare_vm_data(yc_vm, netbox, self._base_id_mapping())
 
-        assert result["memory"] == 8192
+        assert result["memory"] == 8000
         assert result["vcpus"] == 4
 
     def test_memory_string_parsing(self):
@@ -80,8 +80,8 @@ class TestPrepareVmData:
 
         result = prepare_vm_data(yc_vm, netbox, self._base_id_mapping())
 
-        # "8" -> 8 < 1000 -> treated as GB -> 8 * 1024 = 8192 MB
-        assert result["memory"] == 8192
+        # "8" -> 8 < 1000 -> treated as GB -> 8 * 1000 = 8000 MB
+        assert result["memory"] == 8000
 
     def test_memory_zero_when_missing(self):
         """When memory is 0, memory_mb is 0."""
@@ -250,7 +250,7 @@ class TestUpdateVmParameters:
         netbox.update_vm.assert_called_once()
         call_args = netbox.update_vm.call_args
         assert "memory" in call_args[0][1]
-        assert call_args[0][1]["memory"] == 4096
+        assert call_args[0][1]["memory"] == 4000
 
     def test_no_update_when_up_to_date(self):
         """VM is not updated when all parameters match."""
@@ -258,7 +258,7 @@ class TestUpdateVmParameters:
         netbox.ensure_cluster.return_value = 20
 
         vm = MockRecord(
-            id=1, name="test-vm", memory=4096, vcpus=2,
+            id=1, name="test-vm", memory=4000, vcpus=2,
             cluster=MockRecord(id=20), site=MockRecord(id=10),
             platform=MockRecord(id=8), status=MockRecord(value="active"),
             comments=(
@@ -286,7 +286,7 @@ class TestUpdateVmParameters:
         netbox.ensure_cluster.return_value = 20
 
         vm = MockRecord(
-            id=1, name="test-vm", memory=4096, vcpus=2,
+            id=1, name="test-vm", memory=4000, vcpus=2,
             cluster=MockRecord(id=20), site=MockRecord(id=10),
             platform=MockRecord(id=8), status=MockRecord(value="active"),
             comments=(
@@ -700,7 +700,7 @@ class TestSyncVms:
 
         sync_vms(yc_data, netbox, {"zones": {"z1": 10}, "folders": {"f1": 20}}, cleanup_orphaned=False)
 
-        # Should have been called for the parameter update (memory changed from 2048 -> 4096)
+        # Should have been called for the parameter update (memory changed from 2048 -> 4000)
         netbox.update_vm.assert_called_once()
 
     def test_vm_creation_failure_counted(self):

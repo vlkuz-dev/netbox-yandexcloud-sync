@@ -14,7 +14,11 @@ DEFAULT_PLATFORM_SLUG = "linux"
 
 
 def parse_memory_mb(resources: Dict[str, Any], vm_name: str = "unknown") -> int:
-    """Parse memory from YC resources dict, handling string/int/float types. Returns MB."""
+    """Parse memory from YC resources dict, handling string/int/float types.
+
+    Returns MB value suitable for NetBox (which displays GB = MB / 1000).
+    YC returns bytes in binary units (GiB), so we convert: bytes → GiB → * 1000 → MB.
+    """
     memory = resources.get("memory", 0)
     memory_mb = 0
     if memory:
@@ -24,21 +28,25 @@ def parse_memory_mb(resources: Dict[str, Any], vm_name: str = "unknown") -> int:
                 if memory_clean:
                     memory_int = int(memory_clean)
                     if memory_int < 1000:
-                        memory_mb = memory_int * 1024
+                        # Value in GB — convert to NetBox MB
+                        memory_mb = memory_int * 1000
                     elif memory_int < 1000000:
                         memory_mb = memory_int
                     else:
-                        memory_mb = memory_int // (1024 * 1024)
+                        # Value in bytes — convert to GiB then to NetBox MB
+                        memory_mb = round(memory_int / (1024 ** 3) * 1000)
                 else:
                     logger.warning(f"VM {vm_name}: could not parse memory string '{memory}'")
             elif isinstance(memory, (int, float)):
                 memory_int = int(memory)
                 if memory_int < 1000:
-                    memory_mb = memory_int * 1024
+                    # Value in GB — convert to NetBox MB
+                    memory_mb = memory_int * 1000
                 elif memory_int < 1000000:
                     memory_mb = memory_int
                 else:
-                    memory_mb = memory_int // (1024 * 1024)
+                    # Value in bytes — convert to GiB then to NetBox MB
+                    memory_mb = round(memory_int / (1024 ** 3) * 1000)
             else:
                 logger.warning(f"VM {vm_name}: unexpected memory type {type(memory).__name__}: {memory}")
         except (ValueError, TypeError) as e:

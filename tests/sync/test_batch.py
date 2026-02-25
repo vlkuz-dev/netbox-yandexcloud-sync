@@ -313,13 +313,13 @@ class TestProcessVmUpdates:
 
     def test_no_changes_needed(self):
         """VM already in sync - no changes."""
-        vm = make_mock_vm(1, "vm-1", memory=2048, vcpus=2, status="active",
+        vm = make_mock_vm(1, "vm-1", memory=2000, vcpus=2, status="active",
                           cluster_id=10, comments="YC VM ID: vm-1-id")
         cache = self._make_cache_with_vm(vm)
 
         yc_vm = {
             "id": "vm-1-id",
-            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},  # 2048 MB in bytes
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},  # 2 GiB -> 2000 MB
             "status": "RUNNING",
             "folder_id": "folder1",
             "network_interfaces": [],
@@ -337,7 +337,7 @@ class TestProcessVmUpdates:
         cache = self._make_cache_with_vm(vm)
 
         yc_vm = {
-            "resources": {"memory": 4096 * 1024 * 1024, "cores": 2},  # 4096 MB
+            "resources": {"memory": 4096 * 1024 * 1024, "cores": 2},  # 4 GiB
             "status": "RUNNING",
             "network_interfaces": [],
             "disks": [],
@@ -346,7 +346,7 @@ class TestProcessVmUpdates:
 
         result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
         assert result is True
-        assert cache.vms_to_update[1]["memory"] == 4096
+        assert cache.vms_to_update[1]["memory"] == 4000
 
     def test_cpu_change_detected(self):
         """CPU change should be queued."""
@@ -1032,7 +1032,7 @@ class TestApplyBatchUpdates:
     def test_dry_run_returns_zero_stats(self):
         """Dry run should not execute any changes."""
         cache = NetBoxCache()
-        cache.vms_to_update = {1: {"memory": 4096}}
+        cache.vms_to_update = {1: {"memory": 4000}}
         cache.ips_to_create = [{"address": "10.0.0.1/32"}]
 
         netbox = make_mock_netbox()
@@ -1048,13 +1048,13 @@ class TestApplyBatchUpdates:
 
         cache = NetBoxCache()
         cache.vms[1] = vm
-        cache.vms_to_update = {1: {"memory": 4096, "vcpus": 4}}
+        cache.vms_to_update = {1: {"memory": 4000, "vcpus": 4}}
 
         netbox = make_mock_netbox()
         stats = apply_batch_updates(cache, netbox)
 
         assert stats["vms_updated"] == 1
-        assert vm.memory == 4096
+        assert vm.memory == 4000
         assert vm.vcpus == 4
         vm.save.assert_called_once()
 
@@ -1260,7 +1260,7 @@ class TestApplyBatchUpdates:
 
         cache = NetBoxCache()
         cache.vms[1] = vm
-        cache.vms_to_update = {1: {"memory": 4096}}
+        cache.vms_to_update = {1: {"memory": 4000}}
 
         netbox = make_mock_netbox()
         stats = apply_batch_updates(cache, netbox)
@@ -1415,7 +1415,7 @@ class TestSyncVmsOptimized:
 
     def test_existing_vm_no_changes_skipped(self):
         """Existing VM with no changes should be counted as skipped."""
-        vm = make_mock_vm(1, "test-vm", memory=2048, vcpus=2, status="active",
+        vm = make_mock_vm(1, "test-vm", memory=2000, vcpus=2, status="active",
                           cluster_id=10, comments="YC VM ID: vm-id-1")
 
         netbox = make_mock_netbox()
