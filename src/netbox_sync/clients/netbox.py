@@ -427,21 +427,36 @@ class NetBoxClient:
         # Check if cluster exists by name or slug
         cluster = None
 
-        # Try by name first
+        # Try by new name format (cloud/folder) first
         try:
             cluster = self.nb.virtualization.clusters.get(name=cluster_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Cluster lookup by name '{cluster_name}' failed: {e}")
 
-        # If not found, try by slug
+        # If not found by name, try by slug
         if not cluster:
             try:
-                # Note: clusters might not support get by slug, so we may need to iterate
-                all_clusters = list(self.nb.virtualization.clusters.filter(name=cluster_name))
-                if all_clusters:
-                    cluster = all_clusters[0]
-            except Exception:
-                pass
+                cluster = self.nb.virtualization.clusters.get(slug=cluster_slug)
+            except Exception as e:
+                logger.debug(f"Cluster lookup by slug '{cluster_slug}' failed: {e}")
+
+        # Fallback: try old name format (folder_name only, without cloud prefix)
+        if not cluster and cloud_name and folder_name != cluster_name:
+            try:
+                # Use filter() instead of get() — get() raises ValueError
+                # when multiple clusters match the same folder name
+                results = list(self.nb.virtualization.clusters.filter(name=folder_name))
+                if results:
+                    cluster = results[0]
+                    logger.info(
+                        f"Migrating cluster '{folder_name}' → '{cluster_name}'"
+                    )
+                    if not self.dry_run:
+                        cluster.name = cluster_name
+                        cluster.slug = cluster_slug
+                        cluster.save()
+            except Exception as e:
+                logger.debug(f"Cluster fallback lookup by old name '{folder_name}' failed: {e}")
 
         if cluster:
             # Check and apply updates if needed

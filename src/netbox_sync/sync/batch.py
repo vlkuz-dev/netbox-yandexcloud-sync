@@ -12,6 +12,13 @@ from netbox_sync.sync.vms import prepare_vm_data, parse_memory_mb, parse_cores, 
 logger = logging.getLogger(__name__)
 
 
+def _normalize_comments(text: Optional[str]) -> str:
+    """Normalize comments for comparison: strip whitespace, handle None/empty."""
+    if not text:
+        return ""
+    return "\n".join(line.strip() for line in text.strip().splitlines())
+
+
 @dataclass
 class NetBoxCache:
     """Cache for NetBox data to minimize API calls."""
@@ -166,7 +173,8 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
         f"Created: {created_at}" if created_at else None,
     ]
     new_comments = "\n".join(filter(None, comments_parts))
-    if hasattr(vm, 'comments') and vm.comments != new_comments:
+    current_comments = _normalize_comments(getattr(vm, 'comments', None))
+    if current_comments != _normalize_comments(new_comments):
         updates["comments"] = new_comments
 
     if updates:
@@ -279,6 +287,11 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
                     if private_ip_candidate is None:
                         private_ip_candidate = "pending"
                         cache.pending_primary_ips[vm_id] = primary_v4
+                else:
+                    if public_ip_candidate is None:
+                        public_ip_candidate = "pending"
+                        if vm_id not in cache.pending_primary_ips:
+                            cache.pending_primary_ips[vm_id] = primary_v4
 
         # Process public IP
         public_v4 = yc_iface.get("primary_v4_address_one_to_one_nat")
@@ -296,6 +309,10 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
                     "description": "Public IP (NAT)"
                 })
                 changes_made = True
+                if not private_ip_candidate and public_ip_candidate is None:
+                    public_ip_candidate = "pending"
+                    if vm_id not in cache.pending_primary_ips:
+                        cache.pending_primary_ips[vm_id] = public_v4
             else:
                 if not private_ip_candidate and public_ip_candidate is None:
                     public_ip_candidate = existing_public_ip.id
@@ -306,48 +323,64 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
     if private_ip_candidate and private_ip_candidate != "pending":
         primary_ip_to_set = private_ip_candidate
         logger.debug(f"VM {vm_name}: Selecting private IP as primary")
-    elif public_ip_candidate:
+    elif public_ip_candidate and public_ip_candidate != "pending":
         primary_ip_to_set = public_ip_candidate
         logger.debug(f"VM {vm_name}: No private IP available, using public IP as primary")
 
     if not vm.primary_ip4 and primary_ip_to_set:
         cache.primary_ip_changes[vm_id] = primary_ip_to_set
+        logger.debug(f"VM {vm_name}: Queued primary IP change to ID {primary_ip_to_set}")
         changes_made = True
     elif vm.primary_ip4 and primary_ip_to_set:
         current_primary_ip = cache.ips.get(vm.primary_ip4.id)
         if current_primary_ip:
             current_ip_str = get_ip_without_cidr(current_primary_ip.address)
 
-            if private_ip_candidate:
-                if private_ip_candidate == "pending":
-                    if not is_private_ip(current_ip_str):
+            # Stability check: keep current primary if it's still valid
+            # (private, assigned to one of the VM's interfaces)
+            if is_private_ip(current_ip_str):
+                current_assigned_to_vm = any(
+                    current_primary_ip.assigned_object_id == iface.id
+                    for iface in existing_interfaces
+                )
+                if current_assigned_to_vm:
+                    logger.debug(
+                        f"VM {vm_name}: keeping current primary IP"
+                        f" {current_ip_str} (still valid)"
+                    )
+                    # Skip primary IP re-selection — current is stable
+                else:
+                    # Current primary IP was moved to another VM's interface
+                    logger.info(
+                        f"VM {vm_name}: current primary IP {current_ip_str}"
+                        f" no longer assigned to this VM, re-selecting"
+                    )
+                    cache.primary_ip_changes[vm_id] = primary_ip_to_set
+                    changes_made = True
+            else:
+                # Current primary is public — switch to private if available
+                if private_ip_candidate:
+                    if private_ip_candidate == "pending":
                         logger.info(
                             f"VM {vm_name}: Will switch primary from public IP"
                             f" {current_ip_str} to private IP (pending creation)"
                         )
                         cache.primary_ip_changes[vm_id] = "pending"
                         changes_made = True
-                else:
-                    if vm.primary_ip4.id != private_ip_candidate:
-                        if not is_private_ip(current_ip_str):
-                            logger.info(
-                                f"VM {vm_name}: Switching primary from public"
-                                f" IP {current_ip_str} to private IP"
-                            )
-                        else:
-                            logger.info(
-                                f"VM {vm_name}: Switching primary from"
-                                f" {current_ip_str} to different private IP"
-                            )
+                    else:
+                        logger.info(
+                            f"VM {vm_name}: Switching primary from public"
+                            f" IP {current_ip_str} to private IP"
+                        )
                         cache.primary_ip_changes[vm_id] = private_ip_candidate
                         changes_made = True
-            elif public_ip_candidate and vm.primary_ip4.id != public_ip_candidate:
-                logger.info(
-                    f"VM {vm_name}: Updating primary to public IP"
-                    f" {public_ip_candidate} (no private IP available)"
-                )
-                cache.primary_ip_changes[vm_id] = public_ip_candidate
-                changes_made = True
+                elif public_ip_candidate and vm.primary_ip4.id != public_ip_candidate:
+                    logger.info(
+                        f"VM {vm_name}: Updating primary to public IP"
+                        f" {public_ip_candidate} (no private IP available)"
+                    )
+                    cache.primary_ip_changes[vm_id] = public_ip_candidate
+                    changes_made = True
     elif not vm.primary_ip4:
         # Fallback: find any existing IP, preferring private over public
         fallback_private = None
@@ -362,10 +395,21 @@ def process_vm_updates(vm: Any, yc_vm: Dict[str, Any], cache: NetBoxCache,
         fallback_ip = fallback_private or fallback_public
         if fallback_ip:
             cache.primary_ip_changes[vm_id] = fallback_ip
+            logger.debug(f"VM {vm_name}: Using fallback IP ID {fallback_ip} as primary")
             changes_made = True
         elif private_ip_candidate == "pending":
             cache.primary_ip_changes[vm_id] = "pending"
+            logger.debug(f"VM {vm_name}: Queued pending primary IP (private IP not yet created)")
             changes_made = True
+        elif public_ip_candidate == "pending":
+            cache.primary_ip_changes[vm_id] = "pending"
+            logger.debug(f"VM {vm_name}: Queued pending primary IP (public IP not yet created)")
+            changes_made = True
+        else:
+            logger.debug(
+                f"VM {vm_name}: No primary IP candidate found"
+                f" (private={private_ip_candidate}, public={public_ip_candidate})"
+            )
 
     return changes_made
 
@@ -388,6 +432,14 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
     if dry_run:
         logger.info("[DRY-RUN] Would apply the following updates:")
         logger.info(f"  VMs to update: {len(cache.vms_to_update)}")
+        if cache.vms_to_update:
+            # Breakdown by update reason
+            reasons: Dict[str, int] = {}
+            for updates in cache.vms_to_update.values():
+                for key in updates:
+                    reasons[key] = reasons.get(key, 0) + 1
+            for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+                logger.info(f"    - {reason}: {count}")
         logger.info(f"  IPs to update: {len(cache.ips_to_update)}")
         logger.info(f"  Primary IP changes: {len(cache.primary_ip_changes)}")
         logger.info(f"  Interfaces to create: {len(cache.interfaces_to_create)}")
@@ -493,23 +545,35 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
             stats["errors"] += 1
 
     # Resolve pending primary IPs after creation
+    logger.info(f"Resolving {len(cache.pending_primary_ips)} pending primary IPs...")
     for vm_id, pending_ip in cache.pending_primary_ips.items():
         if cache.primary_ip_changes.get(vm_id) == "pending":
             base_pending_ip = pending_ip.split('/')[0] if '/' in pending_ip else pending_ip
             if base_pending_ip in created_ips:
                 cache.primary_ip_changes[vm_id] = created_ips[base_pending_ip].id
-                logger.debug(
-                    f"Resolved pending primary IP for VM ID {vm_id}"
-                    f" to IP ID {created_ips[base_pending_ip].id}"
+                vm = cache.vms.get(vm_id)
+                vm_name = vm.name if vm else vm_id
+                logger.info(
+                    f"VM {vm_name}: Resolved pending primary IP {pending_ip}"
+                    f" → IP ID {created_ips[base_pending_ip].id}"
                 )
             else:
                 vm = cache.vms.get(vm_id)
                 vm_name = vm.name if vm else vm_id
                 logger.warning(
                     f"VM {vm_name}: pending primary IP {pending_ip}"
-                    " could not be resolved (IP creation may have failed)"
+                    f" could not be resolved (IP creation may have failed)."
+                    f" Available created IPs: {list(created_ips.keys())}"
                 )
                 stats["errors"] += 1
+        else:
+            vm = cache.vms.get(vm_id)
+            vm_name = vm.name if vm else vm_id
+            current = cache.primary_ip_changes.get(vm_id)
+            logger.debug(
+                f"VM {vm_name}: pending_primary_ips entry exists"
+                f" but primary_ip_changes is {current!r}, not 'pending'"
+            )
 
     # Step 6: Create disks
     logger.info("Step 6: Creating new disks...")
@@ -538,7 +602,9 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
             stats["errors"] += 1
 
     # Step 8: Set new primary IPs with proper assignment check
-    logger.info("Step 8: Setting new primary IPs...")
+    pending_count = sum(1 for v in cache.primary_ip_changes.values() if v == "pending")
+    actionable = sum(1 for v in cache.primary_ip_changes.values() if v is not None and v != "pending")
+    logger.info(f"Step 8: Setting new primary IPs... ({actionable} actionable, {pending_count} unresolved pending)")
     for vm_id, ip_id in cache.primary_ip_changes.items():
         if ip_id is not None and ip_id != "pending":
             try:
@@ -548,7 +614,7 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
                 if not ip:
                     ip = netbox.nb.ipam.ip_addresses.get(id=ip_id)
                     if not ip:
-                        logger.error(f"IP with ID {ip_id} not found")
+                        logger.error(f"VM {vm.name}: IP with ID {ip_id} not found, cannot set primary")
                         stats["errors"] += 1
                         continue
 
@@ -581,10 +647,15 @@ def apply_batch_updates(cache: NetBoxCache, netbox: NetBoxClient,
                 vm.primary_ip4 = ip_id
                 vm.save()
                 stats["primary_ips_changed"] += 1
-                logger.debug(f"Set primary IP {ip.address} (ID: {ip_id}) on VM {vm.name}")
+                logger.info(f"VM {vm.name}: Set primary IPv4 to {ip.address} (ID: {ip_id})")
             except Exception as e:
-                logger.error(f"Failed to set primary IP on VM {vm_id}: {e}")
+                logger.error(f"VM {vm.name} (ID {vm_id}): Failed to set primary IP {ip_id}: {e}")
                 stats["errors"] += 1
+        elif ip_id == "pending":
+            vm = cache.vms.get(vm_id)
+            vm_name = vm.name if vm else vm_id
+            logger.warning(f"VM {vm_name}: primary IP still 'pending' — was not resolved during IP creation")
+            stats["errors"] += 1
 
     logger.info(f"Batch updates complete: {stats}")
     return stats

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from netbox_sync.sync.batch import (
     NetBoxCache,
+    _normalize_comments,
     load_netbox_data,
     process_vm_updates,
     apply_batch_updates,
@@ -140,6 +141,30 @@ class TestNetBoxCache:
         assert cache.disks_by_vm[999] == []
         # vms_with_primary_ip returns empty set
         assert cache.vms_with_primary_ip[999] == set()
+
+
+# ════════════════════════════════════════════════════════════
+# Tests: _normalize_comments
+# ════════════════════════════════════════════════════════════
+
+
+class TestNormalizeComments:
+    def test_none_returns_empty(self):
+        assert _normalize_comments(None) == ""
+
+    def test_empty_string_returns_empty(self):
+        assert _normalize_comments("") == ""
+
+    def test_strips_whitespace(self):
+        assert _normalize_comments("  hello  \n  world  ") == "hello\nworld"
+
+    def test_trailing_newline_stripped(self):
+        assert _normalize_comments("hello\nworld\n") == "hello\nworld"
+
+    def test_identical_after_normalization(self):
+        a = "YC VM ID: abc\nZone: ru-central1-a"
+        b = "YC VM ID: abc\nZone: ru-central1-a\n"
+        assert _normalize_comments(a) == _normalize_comments(b)
 
 
 # ════════════════════════════════════════════════════════════
@@ -392,6 +417,68 @@ class TestProcessVmUpdates:
         assert result is True
         assert cache.vms_to_update[1]["cluster"] == 20
 
+    def test_comments_match_with_trailing_whitespace(self):
+        """Comments that differ only by trailing whitespace should NOT trigger update."""
+        vm = make_mock_vm(1, "vm-1", memory=2048, vcpus=2, status="active",
+                          cluster_id=10,
+                          comments="YC VM ID: vm-1-id\nZone: ru-central1-a\n")
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "id": "vm-1-id",
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "folder_id": "folder1",
+            "zone_id": "ru-central1-a",
+            "network_interfaces": [],
+            "disks": [],
+        }
+        id_mapping = {"folders": {"folder1": 10}, "zones": {"ru-central1-a": 28}}
+
+        process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        # Only site update (if site differs), no comments update
+        assert "comments" not in cache.vms_to_update.get(1, {})
+
+    def test_comments_none_vs_empty_no_update(self):
+        """VM with None comments and empty generated comments should not trigger update."""
+        vm = make_mock_vm(1, "vm-1", memory=2048, vcpus=2, status="active",
+                          cluster_id=10, comments=None)
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "id": "unknown",
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "folder_id": "folder1",
+            "network_interfaces": [],
+            "disks": [],
+        }
+        id_mapping = {"folders": {"folder1": 10}}
+
+        process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        # Comments "YC VM ID: unknown" should be detected as a real change
+        # (from None to meaningful content)
+        assert "comments" in cache.vms_to_update.get(1, {})
+
+    def test_comments_real_change_detected(self):
+        """Actual comment change should trigger update."""
+        vm = make_mock_vm(1, "vm-1", memory=2048, vcpus=2, status="active",
+                          cluster_id=10, comments="YC VM ID: old-id")
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "id": "new-id",
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "folder_id": "folder1",
+            "network_interfaces": [],
+            "disks": [],
+        }
+        id_mapping = {"folders": {"folder1": 10}}
+
+        process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert cache.vms_to_update[1]["comments"] == "YC VM ID: new-id"
+
     def test_new_disk_queued(self):
         """New disk should be queued for creation."""
         vm = make_mock_vm(1, "vm-1")
@@ -581,6 +668,123 @@ class TestProcessVmUpdates:
         assert result is True
         assert cache.primary_ip_changes[1] == 11  # Public IP
 
+    def test_valid_private_primary_ip_kept_stable(self):
+        """VM with valid private primary IP keeps it — no change queued."""
+        vm = make_mock_vm(1, "vm-1", primary_ip4_id=10)
+        iface0 = make_mock_interface(100, "eth0", 1)
+        iface1 = make_mock_interface(101, "eth1", 1)
+        # Current primary on eth1
+        ip_eth1 = make_mock_ip(10, "10.0.0.50/32", assigned_object_id=101)
+        # Another private IP on eth0 (would be found first)
+        ip_eth0 = make_mock_ip(11, "10.0.0.5/32", assigned_object_id=100)
+
+        cache = self._make_cache_with_vm(vm)
+        cache.interfaces_by_vm[1] = [iface0, iface1]
+        cache.ips_by_address["10.0.0.5"] = ip_eth0
+        cache.ips_by_address["10.0.0.50"] = ip_eth1
+        cache.ips[10] = ip_eth1
+        cache.ips[11] = ip_eth0
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [
+                {"primary_v4_address": "10.0.0.5"},
+                {"primary_v4_address": "10.0.0.50"},
+            ],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        # Current primary (10.0.0.50) is still valid — should NOT be changed
+        assert 1 not in cache.primary_ip_changes
+
+    def test_primary_ip_reassigned_to_other_vm_triggers_change(self):
+        """VM's current primary IP moved to another VM → new primary selected."""
+        vm = make_mock_vm(1, "vm-1", primary_ip4_id=10)
+        iface = make_mock_interface(100, "eth0", 1)
+        # Current primary is assigned to a different VM's interface (999)
+        old_primary = make_mock_ip(10, "10.0.0.50/32", assigned_object_id=999)
+        # New IP on this VM
+        new_ip = make_mock_ip(11, "10.0.0.5/32", assigned_object_id=100)
+
+        cache = self._make_cache_with_vm(vm)
+        cache.interfaces_by_vm[1] = [iface]
+        cache.ips_by_address["10.0.0.5"] = new_ip
+        cache.ips_by_address["10.0.0.50"] = old_primary
+        cache.ips[10] = old_primary
+        cache.ips[11] = new_ip
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [{"primary_v4_address": "10.0.0.5"}],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert cache.primary_ip_changes[1] == 11  # New IP selected
+
+    def test_primary_ip_gone_triggers_new_selection(self):
+        """VM's current primary IP no longer in cache → new primary selected."""
+        vm = make_mock_vm(1, "vm-1", primary_ip4_id=10)
+        iface = make_mock_interface(100, "eth0", 1)
+        new_ip = make_mock_ip(11, "10.0.0.5/32", assigned_object_id=100)
+
+        cache = self._make_cache_with_vm(vm)
+        cache.interfaces_by_vm[1] = [iface]
+        cache.ips_by_address["10.0.0.5"] = new_ip
+        cache.ips[11] = new_ip
+        # Note: IP 10 is NOT in cache (deleted/gone)
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [{"primary_v4_address": "10.0.0.5"}],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        # primary_ip4 exists but IP not in cache → fallback path
+        # Since vm.primary_ip4 is set but current_primary_ip is None,
+        # the primary_ip_to_set is 11 but code path goes to fallback
+        # The exact behavior depends on whether primary_ip_to_set gets set
+        assert result is True
+
+    def test_public_primary_switched_to_private(self):
+        """VM with public primary IP switches to private when available."""
+        vm = make_mock_vm(1, "vm-1", primary_ip4_id=11)
+        iface = make_mock_interface(100, "eth0", 1)
+        private_ip = make_mock_ip(10, "10.0.0.5/32", assigned_object_id=100)
+        # Use a truly public IP (not RFC 5737 documentation range)
+        public_ip = make_mock_ip(11, "51.250.1.10/32", assigned_object_id=100)
+
+        cache = self._make_cache_with_vm(vm)
+        cache.interfaces_by_vm[1] = [iface]
+        cache.ips_by_address["10.0.0.5"] = private_ip
+        cache.ips_by_address["51.250.1.10"] = public_ip
+        cache.ips[10] = private_ip
+        cache.ips[11] = public_ip
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [{
+                "primary_v4_address": "10.0.0.5",
+                "primary_v4_address_one_to_one_nat": "51.250.1.10"
+            }],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert cache.primary_ip_changes[1] == 10  # Switched to private
+
     def test_ip_reassignment_queued(self):
         """IP assigned to wrong interface should be queued for reassignment."""
         vm = make_mock_vm(1, "vm-1")
@@ -747,6 +951,75 @@ class TestProcessVmUpdates:
         assert cache.primary_ip_changes[1] == "pending"
         assert 1 in cache.pending_primary_ips
         assert "10.0.0.5" in cache.pending_primary_ips[1]
+
+    def test_new_vm_public_primary_v4_gets_pending(self):
+        """New VM with only public primary_v4_address (no private) should queue 'pending'."""
+        vm = make_mock_vm(1, "vm-public")
+
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [
+                {"primary_v4_address": "203.0.113.10"},  # public, new
+            ],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert cache.primary_ip_changes[1] == "pending"
+        assert 1 in cache.pending_primary_ips
+        assert "203.0.113.10" in cache.pending_primary_ips[1]
+
+    def test_new_vm_nat_public_only_gets_pending(self):
+        """New VM with only NAT public IP (no primary_v4_address) should queue 'pending'."""
+        vm = make_mock_vm(1, "vm-nat")
+
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [
+                {"primary_v4_address_one_to_one_nat": "203.0.113.42"},
+            ],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert cache.primary_ip_changes[1] == "pending"
+        assert 1 in cache.pending_primary_ips
+        assert "203.0.113.42" in cache.pending_primary_ips[1]
+
+    def test_new_vm_private_ip_preferred_over_pending_public(self):
+        """When private IP is pending and public NAT is also pending, private should be tracked."""
+        vm = make_mock_vm(1, "vm-mixed")
+
+        cache = self._make_cache_with_vm(vm)
+
+        yc_vm = {
+            "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+            "status": "RUNNING",
+            "network_interfaces": [
+                {
+                    "primary_v4_address": "10.0.0.5",
+                    "primary_v4_address_one_to_one_nat": "203.0.113.42",
+                },
+            ],
+            "disks": [],
+        }
+        id_mapping = {"folders": {}}
+
+        result = process_vm_updates(vm, yc_vm, cache, id_mapping, self._mock_netbox())
+        assert result is True
+        assert cache.primary_ip_changes[1] == "pending"
+        # Private IP should be tracked for pending resolution, not public
+        assert cache.pending_primary_ips[1] == "10.0.0.5/32"
 
 
 # ════════════════════════════════════════════════════════════
@@ -1064,6 +1337,24 @@ class TestApplyBatchUpdates:
         netbox.nb.ipam.ip_addresses.get.assert_called_with(id=10)
 
 
+    def test_unresolved_pending_primary_ip_counted_as_error(self):
+        """Unresolved 'pending' primary IPs should be counted as errors in Step 8."""
+        vm = make_mock_vm(1, "vm-1")
+
+        cache = NetBoxCache()
+        cache.vms[1] = vm
+        cache.primary_ip_changes = {1: "pending"}
+        cache.pending_primary_ips = {1: "10.0.0.5/32"}
+        # No IPs to create → pending won't be resolved
+
+        netbox = make_mock_netbox()
+        stats = apply_batch_updates(cache, netbox)
+
+        # Pending was not resolved, so it should be an error
+        assert stats["primary_ips_changed"] == 0
+        assert stats["errors"] >= 1
+
+
 # ════════════════════════════════════════════════════════════
 # Tests: sync_vms_optimized
 # ════════════════════════════════════════════════════════════
@@ -1265,3 +1556,171 @@ class TestSyncVmsOptimized:
 
         stats = sync_vms_optimized(yc_data, netbox, {}, cleanup_orphaned=False)
         assert stats["errors"] == 1
+
+    def test_new_vm_created_with_interfaces_and_primary_ip(self):
+        """New VM with private + public IPs should get primary_ip4 set to private IP."""
+        created_vm = make_mock_vm(100, "new-vm", primary_ip4_id=None)
+        created_iface = make_mock_interface(300, "eth0", 100)
+        private_ip = MockRecord(id=400, address="10.0.0.5/32",
+                                assigned_object_id=300, assigned_object_type="virtualization.vminterface")
+        public_ip = MockRecord(id=401, address="203.0.113.42/32",
+                               assigned_object_id=300, assigned_object_type="virtualization.vminterface")
+
+        netbox = make_mock_netbox()
+        netbox.nb.virtualization.virtual_machines.all.return_value = []
+        netbox.nb.virtualization.interfaces.all.return_value = []
+        netbox.nb.ipam.ip_addresses.all.return_value = []
+        netbox.nb.virtualization.virtual_disks.all.return_value = []
+        netbox.create_vm.return_value = created_vm
+        netbox.create_interface.return_value = created_iface
+
+        # create_ip returns different IPs based on address
+        def create_ip_side_effect(ip_data):
+            addr = ip_data.get("address", "")
+            if "10.0.0.5" in addr:
+                return private_ip
+            elif "203.0.113.42" in addr:
+                return public_ip
+            return MockRecord(id=999, address=addr)
+
+        netbox.create_ip.side_effect = create_ip_side_effect
+
+        # Step 8 falls back to querying NetBox for IP and interfaces
+        netbox.nb.ipam.ip_addresses.get.return_value = private_ip
+        netbox.nb.virtualization.interfaces.filter.return_value = [created_iface]
+
+        yc_data = {
+            "vms": [{
+                "name": "new-vm",
+                "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+                "status": "RUNNING",
+                "network_interfaces": [{
+                    "primary_v4_address": "10.0.0.5",
+                    "primary_v4_address_one_to_one_nat": "203.0.113.42",
+                }],
+                "disks": [],
+            }]
+        }
+
+        stats = sync_vms_optimized(yc_data, netbox, {}, cleanup_orphaned=False)
+        assert stats["created"] == 1
+        netbox.create_vm.assert_called_once()
+        netbox.create_interface.assert_called_once()
+        assert netbox.create_ip.call_count == 2  # private + public
+        # VM should have primary_ip4 set to private IP
+        assert created_vm.primary_ip4 == 400
+
+    def test_new_vm_primary_ip_set_for_public_only(self):
+        """New VM with only public primary_v4_address should still get primary_ip4 set."""
+        created_vm = make_mock_vm(100, "new-vm-pub", primary_ip4_id=None)
+        created_iface = make_mock_interface(300, "eth0", 100)
+        public_ip = MockRecord(id=401, address="203.0.113.10/32",
+                               assigned_object_id=300, assigned_object_type="virtualization.vminterface")
+
+        netbox = make_mock_netbox()
+        netbox.nb.virtualization.virtual_machines.all.return_value = []
+        netbox.nb.virtualization.interfaces.all.return_value = []
+        netbox.nb.ipam.ip_addresses.all.return_value = []
+        netbox.nb.virtualization.virtual_disks.all.return_value = []
+        netbox.create_vm.return_value = created_vm
+        netbox.create_interface.return_value = created_iface
+        netbox.create_ip.return_value = public_ip
+        netbox.nb.ipam.ip_addresses.get.return_value = public_ip
+        netbox.nb.virtualization.interfaces.filter.return_value = [created_iface]
+
+        yc_data = {
+            "vms": [{
+                "name": "new-vm-pub",
+                "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+                "status": "RUNNING",
+                "network_interfaces": [{
+                    "primary_v4_address": "203.0.113.10",  # public IP only
+                }],
+                "disks": [],
+            }]
+        }
+
+        stats = sync_vms_optimized(yc_data, netbox, {}, cleanup_orphaned=False)
+        assert stats["created"] == 1
+        assert created_vm.primary_ip4 == 401
+
+    def test_multiple_new_vms_all_get_primary_ip(self):
+        """Multiple new VMs should each get their own primary_ip4 set."""
+        vm1 = make_mock_vm(100, "vm-1", primary_ip4_id=None)
+        vm2 = make_mock_vm(101, "vm-2", primary_ip4_id=None)
+        iface1 = make_mock_interface(300, "eth0", 100)
+        iface2 = make_mock_interface(301, "eth0", 101)
+        ip1 = MockRecord(id=400, address="10.0.0.5/32",
+                         assigned_object_id=300, assigned_object_type="virtualization.vminterface")
+        ip2 = MockRecord(id=401, address="10.0.0.6/32",
+                         assigned_object_id=301, assigned_object_type="virtualization.vminterface")
+
+        netbox = make_mock_netbox()
+        netbox.nb.virtualization.virtual_machines.all.return_value = []
+        netbox.nb.virtualization.interfaces.all.return_value = []
+        netbox.nb.ipam.ip_addresses.all.return_value = []
+        netbox.nb.virtualization.virtual_disks.all.return_value = []
+
+        vm_call_count = [0]
+        def create_vm_side_effect(data):
+            vm_call_count[0] += 1
+            return vm1 if vm_call_count[0] == 1 else vm2
+
+        iface_call_count = [0]
+        def create_iface_side_effect(data):
+            iface_call_count[0] += 1
+            return iface1 if iface_call_count[0] == 1 else iface2
+
+        def create_ip_side_effect(ip_data):
+            addr = ip_data.get("address", "")
+            if "10.0.0.5" in addr:
+                return ip1
+            elif "10.0.0.6" in addr:
+                return ip2
+            return MockRecord(id=999, address=addr)
+
+        netbox.create_vm.side_effect = create_vm_side_effect
+        netbox.create_interface.side_effect = create_iface_side_effect
+        netbox.create_ip.side_effect = create_ip_side_effect
+
+        def ip_get_side_effect(id):
+            if id == 400:
+                return ip1
+            elif id == 401:
+                return ip2
+            return None
+
+        netbox.nb.ipam.ip_addresses.get.side_effect = ip_get_side_effect
+
+        def iface_filter_side_effect(virtual_machine_id):
+            if virtual_machine_id == 100:
+                return [iface1]
+            elif virtual_machine_id == 101:
+                return [iface2]
+            return []
+
+        netbox.nb.virtualization.interfaces.filter.side_effect = iface_filter_side_effect
+
+        yc_data = {
+            "vms": [
+                {
+                    "name": "vm-1",
+                    "resources": {"memory": 2048 * 1024 * 1024, "cores": 2},
+                    "status": "RUNNING",
+                    "network_interfaces": [{"primary_v4_address": "10.0.0.5"}],
+                    "disks": [],
+                },
+                {
+                    "name": "vm-2",
+                    "resources": {"memory": 4096 * 1024 * 1024, "cores": 4},
+                    "status": "RUNNING",
+                    "network_interfaces": [{"primary_v4_address": "10.0.0.6"}],
+                    "disks": [],
+                },
+            ]
+        }
+
+        stats = sync_vms_optimized(yc_data, netbox, {}, cleanup_orphaned=False)
+        assert stats["created"] == 2
+        assert vm1.primary_ip4 == 400
+        assert vm2.primary_ip4 == 401

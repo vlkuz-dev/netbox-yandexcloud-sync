@@ -556,16 +556,63 @@ class TestSafeUpdateObject:
 
 
 class TestEnsureCluster:
-    def test_finds_existing_cluster(self, nb_client):
+    def test_finds_existing_cluster_by_new_name(self, nb_client):
+        """Cluster found by new name format (cloud/folder) — no migration."""
         nb_client._sync_tag_id = 1
         nb_client._cluster_type_id = 2
         cluster = MockRecord(10, name="my-cloud/prod", tags=[],
-                             type=MockRecord(2), site=None, comments="")
+                             type=MockRecord(2), site=None,
+                             comments="Folder ID: folder1")
         nb_client.nb.virtualization.clusters.get.return_value = cluster
 
         result = nb_client.ensure_cluster("prod", "folder1", "my-cloud")
 
         assert result == 10
+
+    def test_finds_existing_cluster_by_old_name_and_migrates(self, nb_client):
+        """Cluster found by old name (folder only) via filter() — renamed to new format."""
+        nb_client._sync_tag_id = 1
+        nb_client._cluster_type_id = 2
+        old_cluster = MockRecord(15, name="prod-devops", tags=[],
+                                 type=MockRecord(2), site=None, comments="")
+
+        # New name and slug lookups return None
+        def get_side_effect(**kwargs):
+            return None
+
+        nb_client.nb.virtualization.clusters.get.side_effect = get_side_effect
+        # Old name fallback uses filter() instead of get()
+        nb_client.nb.virtualization.clusters.filter.return_value = [old_cluster]
+
+        result = nb_client.ensure_cluster("prod-devops", "b1gn93aeri4145duf1qt", "grand-trade")
+
+        assert result == 15
+        # Should rename cluster to new format
+        assert old_cluster.name == "grand-trade/prod-devops"
+        assert old_cluster.slug == "grand-trade-prod-devops"
+        old_cluster.save.assert_called()
+        # Verify filter was called with old name
+        nb_client.nb.virtualization.clusters.filter.assert_called_with(name="prod-devops")
+
+    def test_finds_existing_cluster_by_slug(self, nb_client):
+        """Cluster found by slug when name lookup fails."""
+        nb_client._sync_tag_id = 1
+        nb_client._cluster_type_id = 2
+        cluster = MockRecord(20, name="grand-trade/infra", slug="grand-trade-infra",
+                             tags=[], type=MockRecord(2), site=None, comments="")
+
+        def get_side_effect(**kwargs):
+            if kwargs.get("name") == "grand-trade/infra":
+                return None  # name lookup fails
+            if kwargs.get("slug") == "grand-trade-infra":
+                return cluster  # slug lookup succeeds
+            return None
+
+        nb_client.nb.virtualization.clusters.get.side_effect = get_side_effect
+
+        result = nb_client.ensure_cluster("infra", "folder-id", "grand-trade")
+
+        assert result == 20
 
     def test_creates_cluster_when_not_found(self, nb_client):
         nb_client._sync_tag_id = 1
@@ -584,11 +631,10 @@ class TestEnsureCluster:
         assert call_args["site"] == 5
 
     def test_creates_cluster_without_cloud_name(self, nb_client):
-        """When cloud_name is empty, uses folder_name only."""
+        """When cloud_name is empty, uses folder_name only — no fallback needed."""
         nb_client._sync_tag_id = 1
         nb_client._cluster_type_id = 2
         nb_client.nb.virtualization.clusters.get.return_value = None
-        nb_client.nb.virtualization.clusters.filter.return_value = []
         new_cluster = MockRecord(12, name="standalone")
         nb_client.nb.virtualization.clusters.create.return_value = new_cluster
 
@@ -598,13 +644,36 @@ class TestEnsureCluster:
         call_args = nb_client.nb.virtualization.clusters.create.call_args[0][0]
         assert call_args["name"] == "standalone"
 
-    def test_dry_run(self, nb_client_dry_run):
+    def test_dry_run_not_found(self, nb_client_dry_run):
+        """Dry-run when cluster doesn't exist — returns mock ID."""
         nb_client_dry_run.nb.virtualization.clusters.get.return_value = None
         nb_client_dry_run.nb.virtualization.clusters.filter.return_value = []
 
         result = nb_client_dry_run.ensure_cluster("prod", "f1", "cloud1")
 
         assert result == 1
+
+    def test_dry_run_found_by_old_name(self, nb_client_dry_run):
+        """Dry-run finds cluster by old name via filter() — returns real ID, no rename."""
+        nb_client_dry_run._sync_tag_id = 1
+        nb_client_dry_run._cluster_type_id = 2
+        old_cluster = MockRecord(25, name="prod", tags=[],
+                                 type=MockRecord(2), site=None, comments="")
+
+        # New name and slug lookups return None
+        def get_side_effect(**kwargs):
+            return None
+
+        nb_client_dry_run.nb.virtualization.clusters.get.side_effect = get_side_effect
+        # Old name fallback uses filter()
+        nb_client_dry_run.nb.virtualization.clusters.filter.return_value = [old_cluster]
+
+        result = nb_client_dry_run.ensure_cluster("prod", "f1", "cloud1")
+
+        assert result == 25
+        # Dry-run should NOT rename
+        assert old_cluster.name == "prod"
+        old_cluster.save.assert_not_called()
 
 
 class TestEnsurePlatform:
